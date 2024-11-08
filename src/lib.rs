@@ -2,17 +2,18 @@
 //!
 //! [`.stack_sizes`]: https://llvm.org/docs/CodeGenerator.html#emitting-function-stack-size-information
 
-#![deny(rust_2018_idioms)]
-#![deny(missing_docs)]
-#![deny(warnings)]
+// #![deny(rust_2018_idioms)]
+// #![deny(missing_docs)]
+// #![deny(warnings)]
+
+#![allow(unused_imports)]
 
 use core::u16;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     io::Cursor,
+    vec,
 };
-#[cfg(feature = "tools")]
-use std::{fs, path::Path};
 
 use anyhow::{anyhow, bail};
 use byteorder::{ReadBytesExt, LE};
@@ -23,43 +24,60 @@ use xmas_elf::{
     ElfFile,
 };
 
+
+
+
+
+
+
+
+
+
+
 /// Functions found after analyzing an executable
 #[derive(Clone, Debug)]
-pub struct Functions<'a> {
+pub struct Functions {
     /// Whether the addresses of these functions are 32-bit or 64-bit
     pub have_32_bit_addresses: bool,
 
     /// "undefined" symbols, symbols that need to be dynamically loaded
-    pub undefined: HashSet<&'a str>,
+    pub undefined: HashSet<String>,
 
     /// "defined" symbols, symbols with known locations (addresses)
-    pub defined: BTreeMap<u64, Function<'a>>,
+    pub defined: BTreeMap<u64, Function>,
 }
+
+
+
+
+
+
+
+
+
+
 
 /// A symbol that represents a function (subroutine)
 #[derive(Clone, Debug)]
-pub struct Function<'a> {
-    names: Vec<&'a str>,
-    size: u64,
-    stack: Option<u64>,
+pub struct Function {
+    /// The (mangled) name of the function and its aliases
+    pub names: Vec<String>,
+    /// The size of this subroutine in bytes
+    pub size: u64,
+    /// The stack usage of the function in bytes
+    pub stack: Option<u64>,
 }
 
-impl<'a> Function<'a> {
-    /// Returns the (mangled) name of the function and its aliases
-    pub fn names(&self) -> &[&'a str] {
-        &self.names
-    }
 
-    /// Returns the size of this subroutine in bytes
-    pub fn size(&self) -> u64 {
-        self.size
-    }
 
-    /// Returns the stack usage of the function in bytes
-    pub fn stack(&self) -> Option<u64> {
-        self.stack
-    }
-}
+
+
+
+
+
+
+
+
 
 // is this symbol a tag used to delimit code / data sections within a subroutine?
 fn is_tag(name: &str) -> bool {
@@ -69,20 +87,40 @@ fn is_tag(name: &str) -> bool {
     }
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 fn process_symtab_obj<'a, E>(
-    entries: &'a [E],
-    elf: &ElfFile<'a>,
+    entries: &[E],
+    elf: &ElfFile,
 ) -> anyhow::Result<
     (
-        BTreeMap<u16, BTreeMap<u64, HashSet<&'a str>>>,
+        BTreeMap<u16, BTreeMap<u64, HashSet<String>>>,
         BTreeMap<u32, u16>,
     )
 >
 where
     E: Entry,
 {
-    let mut names: BTreeMap<_, BTreeMap<_, HashSet<_>>> = BTreeMap::new();
-    let mut shndxs = BTreeMap::new();
+    let mut names: BTreeMap<u16, BTreeMap<u64, HashSet<String>>> = BTreeMap::new();
+    let mut shndxs: BTreeMap<u32, u16> = BTreeMap::new();
 
     for (entry, i) in entries.iter().zip(0..) {
         let name = entry.get_name(elf);
@@ -107,17 +145,38 @@ where
                 .or_default()
                 .entry(addr)
                 .or_default()
-                .insert(name);
+                .insert(name.to_string());
         }
     }
 
     Ok((names, shndxs))
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 /// Parses an *input* (AKA relocatable) object file (`.o`) and returns a list of symbols and their
 /// stack usage
-pub fn analyze_object(obj: &[u8]) -> anyhow::Result<HashMap<&str, u64>> {
-    let elf = &ElfFile::new(obj).map_err(anyhow::Error::msg)?;
+pub fn analyze_object(obj: Vec<u8>) -> anyhow::Result<HashMap<String, u64>> 
+{
+    let elf = ElfFile::new(&obj).map_err(anyhow::Error::msg)?;
 
     if elf.header.pt2.type_().as_type() != header::Type::Relocatable {
         bail!("object file is not relocatable")
@@ -128,29 +187,29 @@ pub fn analyze_object(obj: &[u8]) -> anyhow::Result<HashMap<&str, u64>> {
     let (shndx2names, symtab2shndx) = match elf
         .find_section_by_name(".symtab")
         .ok_or_else(|| anyhow!("`.symtab` section not found"))?
-        .get_data(elf)
+        .get_data(&elf)
     {
-        Ok(SectionData::SymbolTable32(entries)) => process_symtab_obj(entries, elf)?,
+        Ok(SectionData::SymbolTable32(entries)) => process_symtab_obj(entries, &elf)?,
 
         Ok(SectionData::SymbolTable64(entries)) => {
             is_64_bit = true;
-            process_symtab_obj(entries, elf)?
+            process_symtab_obj(entries, &elf)?
         }
 
         _ => bail!("malformed .symtab section"),
     };
 
-    let mut sizes = HashMap::new();
+    let mut sizes: HashMap<String, u64> = HashMap::new();
     let mut sections = elf.section_iter();
     while let Some(section) = sections.next() {
-        if section.get_name(elf) == Ok(".stack_sizes") {
-            let mut stack_sizes = Cursor::new(section.raw_data(elf));
+        if section.get_name(&elf) == Ok(".stack_sizes") {
+            let mut stack_sizes = Cursor::new(section.raw_data(&elf));
 
             // next section should be `.rel.stack_sizes` or `.rela.stack_sizes`
             // XXX should we check the section name?
             let relocs: Vec<_> = match sections
                 .next()
-                .and_then(|section| section.get_data(elf).ok())
+                .and_then(|section| section.get_data(&elf).ok())
             {
                 Some(SectionData::Rel32(rels)) if !is_64_bit => rels
                     .iter()
@@ -176,32 +235,54 @@ pub fn analyze_object(obj: &[u8]) -> anyhow::Result<HashMap<&str, u64>> {
             };
 
             for index in relocs {
-                let addr = if is_64_bit {
+                let addr = if is_64_bit 
+                {
                     stack_sizes.read_u64::<LE>()?
-                } else {
+                }
+                else 
+                {
                     u64::from(stack_sizes.read_u32::<LE>()?)
                 };
+
                 let stack = leb128::read::unsigned(&mut stack_sizes).unwrap();
 
                 let shndx = symtab2shndx[&index];
-                let entries = shndx2names
+                let entries: &BTreeMap<u64, HashSet<String>> = shndx2names
                     .get(&(shndx as u16))
                     .unwrap_or_else(|| panic!("section header with index {} not found", shndx));
 
-                assert!(sizes
-                    .insert(
-                        *entries
-                            .get(&addr)
-                            .unwrap_or_else(|| panic!(
-                                "symbol with address {} not found at section {} ({:?})",
-                                addr, shndx, entries
-                            ))
-                            .iter()
-                            .next()
-                            .unwrap(),
-                        stack
-                    )
-                    .is_none());
+                {
+                    /*
+                    assert!(sizes
+                        .insert(
+                            *entries
+                                .get(&addr)
+                                .unwrap_or_else(|| panic!(
+                                    "symbol with address {} not found at section {} ({:?})",
+                                    addr, shndx, entries
+                                ))
+                                .iter()
+                                .next()
+                                .unwrap()
+                                .to_string()
+                            ,
+                            stack
+                        )
+                        .is_none());
+                    */
+
+                    let _e0: Option<&HashSet<String>> = entries.get(&addr);
+                    let _e1: &HashSet<String>         = _e0.unwrap_or_else(|| panic!(
+                                                            "symbol with address {} not found at section {} ({:?})",
+                                                            addr, shndx, entries
+                                                        ));
+                    let _e2: String = _e1.iter().next().unwrap().to_string();
+                    let _s: u64 = stack;
+
+                    // inserting into a hashmap returns None if the value is new
+                    // returns Some(x) where x is the old value that was replaced.
+                    assert!( sizes.insert(_e2, _s).is_none() );
+                }
             }
 
             if stack_sizes.position() != stack_sizes.get_ref().len() as u64 {
@@ -215,16 +296,32 @@ pub fn analyze_object(obj: &[u8]) -> anyhow::Result<HashMap<&str, u64>> {
     Ok(sizes)
 }
 
-fn process_symtab_exec<'a, E>(
-    entries: &'a [E],
-    elf: &ElfFile<'a>,
-) -> anyhow::Result<(HashSet<&'a str>, BTreeMap<u64, Function<'a>>)>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fn process_symtab_exec<E>(
+    entries: &[E],
+    elf_bytes: Vec<u8>
+) -> anyhow::Result< ( HashSet<String>, BTreeMap<u64, Function> ) >
 where
     E: Entry + core::fmt::Debug,
 {
-    let mut defined = BTreeMap::new();
-    let mut maybe_aliases = BTreeMap::new();
-    let mut undefined = HashSet::new();
+    let elf_clone                                     = elf_bytes.clone();
+    let elf:               ElfFile                    = ElfFile::new(&elf_clone).unwrap();
+    let mut defined:       BTreeMap<u64, Function>    = BTreeMap::new();
+    let mut maybe_aliases: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+    let mut undefined:     HashSet<String>            = HashSet::new();
 
     for entry in entries {
         let ty = entry.get_type();
@@ -235,9 +332,12 @@ where
         if ty == Ok(Type::Func) {
             let name = name.map_err(anyhow::Error::msg)?;
 
-            if value == 0 && size == 0 {
-                undefined.insert(name);
-            } else {
+            if value == 0 && size == 0 
+            {
+                undefined.insert(name.to_string());
+            }
+            else
+            {
                 defined
                     .entry(value)
                     .or_insert(Function {
@@ -246,22 +346,30 @@ where
                         stack: None,
                     })
                     .names
-                    .push(name);
+                    .push(name.to_string());
             }
-        } else if ty == Ok(Type::NoType) {
-            if let Ok(name) = name {
-                if !is_tag(name) {
-                    maybe_aliases.entry(value).or_insert(vec![]).push(name);
+        }
+        else if ty == Ok(Type::NoType)
+        {
+            if let Ok(name) = name 
+            {
+                if !is_tag(name)
+                {
+                    maybe_aliases.entry(value).or_insert(vec![]).push(name.to_string());
                 }
             }
         }
     }
 
-    for (value, alias) in maybe_aliases {
+    for (value, alias) in maybe_aliases
+    {
         // try with the thumb bit both set and clear
-        if let Some(sym) = defined.get_mut(&(value | 1)) {
+        if let Some(sym) = defined.get_mut(&(value | 1))
+        {
             sym.names.extend(alias);
-        } else if let Some(sym) = defined.get_mut(&(value & !1)) {
+        }
+        else if let Some(sym) = defined.get_mut(&(value & !1))
+        {
             sym.names.extend(alias);
         }
     }
@@ -269,20 +377,32 @@ where
     Ok((undefined, defined))
 }
 
+
+
+
+
+
+
+
+
+
+
+
 /// Parses an executable ELF file and returns a list of functions and their stack usage
-pub fn analyze_executable(elf: &[u8]) -> anyhow::Result<Functions<'_>> {
-    let elf = &ElfFile::new(elf).map_err(anyhow::Error::msg)?;
+pub fn analyze_executable(elf_bytes: Vec<u8>) -> anyhow::Result<Functions> {
+    let elf = ElfFile::new(&elf_bytes).map_err(anyhow::Error::msg)?;
 
     let mut have_32_bit_addresses = false;
     let (undefined, mut defined) = if let Some(section) = elf.find_section_by_name(".symtab") {
-        match section.get_data(elf).map_err(anyhow::Error::msg)? {
-            SectionData::SymbolTable32(entries) => {
+        match section.get_data(&elf).map_err(anyhow::Error::msg)? 
+        {
+            SectionData::SymbolTable32(entries) =>
+            {
                 have_32_bit_addresses = true;
-
-                process_symtab_exec(entries, elf)?
+                process_symtab_exec(entries, elf_bytes.clone())?
             }
 
-            SectionData::SymbolTable64(entries) => process_symtab_exec(entries, elf)?,
+            SectionData::SymbolTable64(entries) => process_symtab_exec(entries, elf_bytes.clone())?,
             _ => bail!("malformed .symtab section"),
         }
     } else {
@@ -290,7 +410,7 @@ pub fn analyze_executable(elf: &[u8]) -> anyhow::Result<Functions<'_>> {
     };
 
     if let Some(stack_sizes) = elf.find_section_by_name(".stack_sizes") {
-        let data = stack_sizes.raw_data(elf);
+        let data = stack_sizes.raw_data(&elf);
         let end = data.len() as u64;
         let mut cursor = Cursor::new(data);
 
@@ -319,4 +439,5 @@ pub fn analyze_executable(elf: &[u8]) -> anyhow::Result<Functions<'_>> {
         undefined,
     })
 }
+
 
